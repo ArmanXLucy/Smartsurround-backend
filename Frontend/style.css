@@ -1,0 +1,229 @@
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  background: #0b1120;
+  color: #f8fafc;
+  min-height: 100vh;
+}
+
+.navbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 8%;
+  background: #111827;
+  border-bottom: 1px solid #263247;
+}
+
+.logo {
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.logo span {
+  color: #38bdf8;
+}
+
+.system-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #cbd5e1;
+  font-size: 14px;
+}
+
+.status-dot,
+.live-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #22c55e;
+  display: inline-block;
+}
+
+.container {
+  width: min(1100px, 90%);
+  margin: 50px auto;
+}
+
+.page-heading {
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  color: #38bdf8;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  margin-bottom: 12px;
+}
+
+.page-heading h1 {
+  font-size: clamp(28px, 5vw, 40px);
+  margin-bottom: 12px;
+}
+
+.page-heading p:last-child {
+  color: #94a3b8;
+  line-height: 1.6;
+}
+
+.camera-card,
+.info-card {
+  background: #111827;
+  border: 1px solid #263247;
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 24px;
+}
+
+.camera-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 22px;
+}
+
+.camera-header h2,
+.info-card h2 {
+  font-size: 18px;
+  margin-bottom: 7px;
+}
+
+.camera-header p {
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.live-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #4ade80;
+  background: #14532d40;
+  border: 1px solid #166534;
+  border-radius: 20px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.camera-screen {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #020617;
+}
+
+.camera-screen img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-error {
+  display: none;
+  position: absolute;
+  inset: 0;
+  padding: 20px;
+  text-align: center;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  background: #020617;
+}
+
+.camera-error h3 {
+  color: #f87171;
+}
+
+.camera-error p {
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.camera-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 22px;
+  color: #94a3b8;
+  font-size: 13px;
+}
+
+.camera-footer button {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  background: #0284c7;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.camera-footer button:hover {
+  background: #0369a1;
+}
+
+.info-card {
+  padding: 24px;
+}
+
+.info-card h2 {
+  margin-bottom: 18px;
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 14px 0;
+  border-top: 1px solid #263247;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.info-row strong {
+  color: #e2e8f0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+footer {
+  text-align: center;
+  padding: 25px 15px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+@media (max-width: 600px) {
+  .navbar {
+    padding: 18px 5%;
+  }
+
+  .logo {
+    font-size: 20px;
+  }
+
+  .container {
+    width: 92%;
+    margin: 32px auto;
+  }
+
+  .camera-header,
+  .camera-footer {
+    padding: 16px;
+  }
+
+  .info-card {
+    padding: 18px;
+  }
+}

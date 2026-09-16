@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>SmartSurround | Live Monitoring</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <header class="navbar">
+        <div class="logo">Smart<span>Surround</span></div>
+        <div class="system-status">
+            <span class="status-dot"></span>
+            Monitoring System
+        </div>
+    </header>
+
+    <main class="container">
+        <section class="page-heading">
+            <p class="eyebrow">ENVIRONMENTAL SAFETY MONITORING</p>
+            <h1>Live Camera Monitoring</h1>
+            <p>View real-time footage from your ESP32-CAM device.</p>
+        </section>
+
+        <section class="camera-card">
+            <div class="camera-header">
+                <div>
+                    <h2>ESP32-CAM</h2>
+                    <p>AI Thinker Camera Module</p>
+                </div>
+
+                <span class="live-badge">
+                    <span class="live-dot"></span>
+                    LIVE
+                </span>
+            </div>
+
+            <div class="camera-screen">
+                <img id="cameraFeed" src="http://192.168.1.103:3000/camera/stream" alt="Live ESP32-CAM footage">
+
+                <div id="cameraError" class="camera-error">
+                    <h3>Camera feed unavailable</h3>
+                    <p>Check the ESP32-CAM and backend connection.</p>
+                </div>
+            </div>
+
+            <div class="camera-footer">
+                <span>Camera: ESP32-CAM</span>
+                <button id="refreshButton">Refresh Feed</button>
+            </div>
+        </section>
+
+        <section class="info-card">
+            <h2>Device Information</h2>
+
+            <div class="info-row">
+                <span>Device</span>
+                <strong>AI Thinker ESP32-CAM</strong>
+            </div>
+
+            <div class="info-row">
+                <span>Stream endpoint</span>
+                <strong>/camera/stream</strong>
+            </div>
+
+            <div class="info-row">
+                <span>Connection</span>
+                <strong>Local backend</strong>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        SmartSurround © 2026 | Environmental Safety Monitoring
+    </footer>
+
+    <script>
+        const cameraFeed = document.getElementById("cameraFeed");
+        const cameraError = document.getElementById("cameraError");
+        const refreshButton = document.getElementById("refreshButton");
+
+        cameraFeed.onerror = () => {
+            cameraError.style.display = "flex";
+        };
+
+        refreshButton.addEventListener("click", () => {
+            cameraError.style.display = "none";
+
+            cameraFeed.src = "";
+
+            setTimeout(() => {
+                cameraFeed.src =
+                    "http://localhost:3000/camera/stream";
+            }, 200);
+        });
+    </script>
+</body>
+
+</html>

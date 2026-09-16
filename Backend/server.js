@@ -16,11 +16,16 @@ if (!CAMERA_TOKEN) {
   throw new Error("CAMERA_TOKEN is missing");
 }
 
-if (FRONTEND_ORIGIN) {
-  app.use(cors({
-    origin: FRONTEND_ORIGIN
-  }));
-}
+const allowedOrigins = [
+  "https://armanxlucy.github.io",
+  "http://192.168.1.103:5000"
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
 app.get("/health", (req, res) => {
   res.json({

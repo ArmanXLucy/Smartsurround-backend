@@ -1,6 +1,6 @@
+
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,6 +12,7 @@
 <body>
     <header class="navbar">
         <div class="logo">Smart<span>Surround</span></div>
+
         <div class="system-status">
             <span class="status-dot"></span>
             Monitoring System
@@ -22,7 +23,7 @@
         <section class="page-heading">
             <p class="eyebrow">ENVIRONMENTAL SAFETY MONITORING</p>
             <h1>Live Camera Monitoring</h1>
-            <p>View real-time footage from your ESP32-CAM device.</p>
+            <p>View camera frames uploaded from your ESP32-CAM.</p>
         </section>
 
         <section class="camera-card">
@@ -39,17 +40,24 @@
             </div>
 
             <div class="camera-screen">
-                <img id="cameraFeed" src="http://192.168.1.103:3000/camera/stream" alt="Live ESP32-CAM footage">
+                <img
+                    id="cameraFeed"
+                    alt="Live ESP32-CAM footage"
+                >
 
                 <div id="cameraError" class="camera-error">
                     <h3>Camera feed unavailable</h3>
-                    <p>Check the ESP32-CAM and backend connection.</p>
+                    <p id="errorMessage">
+                        Waiting for camera connection...
+                    </p>
                 </div>
             </div>
 
             <div class="camera-footer">
-                <span>Camera: ESP32-CAM</span>
-                <button id="refreshButton">Refresh Feed</button>
+                <span id="cameraStatus">Connecting...</span>
+                <button id="refreshButton" type="button">
+                    Refresh Feed
+                </button>
             </div>
         </section>
 
@@ -62,13 +70,18 @@
             </div>
 
             <div class="info-row">
-                <span>Stream endpoint</span>
-                <strong>/camera/stream</strong>
+                <span>Backend</span>
+                <strong>Render Cloud</strong>
+            </div>
+
+            <div class="info-row">
+                <span>Frame endpoint</span>
+                <strong>/api/frame</strong>
             </div>
 
             <div class="info-row">
                 <span>Connection</span>
-                <strong>Local backend</strong>
+                <strong id="connectionStatus">Checking...</strong>
             </div>
         </section>
     </main>
@@ -78,25 +91,101 @@
     </footer>
 
     <script>
+        const API_URL =
+            "https://smartsurround-backend.onrender.com";
+
+        // Replace with your new token.
+        // Do not use the old token that was shared in chat.
+        const CAMERA_TOKEN =
+            "9b5bcdea892fd8bb7b2424918352c9af2f42bffa9f770e0307341a1681c5a156";
+
         const cameraFeed = document.getElementById("cameraFeed");
         const cameraError = document.getElementById("cameraError");
+        const errorMessage = document.getElementById("errorMessage");
+        const cameraStatus = document.getElementById("cameraStatus");
+        const connectionStatus = document.getElementById("connectionStatus");
         const refreshButton = document.getElementById("refreshButton");
 
-        cameraFeed.onerror = () => {
+        let currentImageUrl = null;
+        let isLoading = false;
+
+        async function loadCameraFrame() {
+            if (isLoading) return;
+
+            isLoading = true;
+            cameraStatus.textContent = "Loading camera frame...";
+
+            try {
+                const response = await fetch(`${API_URL}/api/frame`, {
+                    method: "GET",
+                    headers: {
+                        "Authorization": `Bearer ${CAMERA_TOKEN}`
+                    },
+                    cache: "no-store"
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const imageBlob = await response.blob();
+
+                if (!imageBlob.type.startsWith("image/")) {
+                    throw new Error("Server did not return an image");
+                }
+
+                const newImageUrl = URL.createObjectURL(imageBlob);
+
+                cameraFeed.onload = () => {
+                    if (currentImageUrl) {
+                        URL.revokeObjectURL(currentImageUrl);
+                    }
+
+                    currentImageUrl = newImageUrl;
+                    cameraError.style.display = "none";
+                    cameraStatus.textContent = "Camera connected";
+                    connectionStatus.textContent = "Connected";
+                };
+
+                cameraFeed.onerror = () => {
+                    URL.revokeObjectURL(newImageUrl);
+                    showCameraError("Could not display the image");
+                };
+
+                cameraFeed.src = newImageUrl;
+
+            } catch (error) {
+                console.error("Camera feed error:", error);
+
+                if (error.message.includes("401")) {
+                    showCameraError(
+                        "Unauthorized. Check the camera token in Render and this HTML."
+                    );
+                } else if (error.message.includes("404")) {
+                    showCameraError(
+                        "The /api/frame endpoint was not found on the backend."
+                    );
+                } else {
+                    showCameraError(
+                        `Unable to load camera frame: ${error.message}`
+                    );
+                }
+            } finally {
+                isLoading = false;
+            }
+        }
+
+        function showCameraError(message) {
             cameraError.style.display = "flex";
-        };
+            errorMessage.textContent = message;
+            cameraStatus.textContent = "Camera unavailable";
+            connectionStatus.textContent = "Disconnected";
+        }
 
-        refreshButton.addEventListener("click", () => {
-            cameraError.style.display = "none";
+        refreshButton.addEventListener("click", loadCameraFrame);
 
-            cameraFeed.src = "";
-
-            setTimeout(() => {
-                cameraFeed.src =
-                    "https://smartsurround-backend.onrender.com/health";
-            }, 200);
-        });
+        loadCameraFrame();
+        setInterval(loadCameraFrame, 500);
     </script>
 </body>
-
 </html>

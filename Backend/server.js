@@ -21,6 +21,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
   "http://192.168.1.103:5000",
+  "https://smartsurround.vercel.app/",
   FRONTEND_ORIGIN
 ].filter(Boolean);
 

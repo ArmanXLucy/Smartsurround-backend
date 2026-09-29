@@ -123,7 +123,22 @@ _ADMIN_DIGEST   = None
 if ADMIN_PIN:
     _ADMIN_DIGEST = _derive_pin_digest(ADMIN_PIN, _ADMIN_SALT)
 
-CORS_ORIGINS   = [o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:5000,http://127.0.0.1:5000,http://localhost:5173,http://127.0.0.1:5173,https://armanxlucy.github.io").split(",") if o.strip()]
+_DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5000",
+    "http://127.0.0.1:5000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://armanxlucy.github.io",
+    "https://smartsurround.vercel.app",
+]
+_CONFIGURED_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+# Keep the known production frontend allowed even when a deployment defines
+# CORS_ORIGINS for additional preview or custom domains.
+CORS_ORIGINS = list(dict.fromkeys(_DEFAULT_CORS_ORIGINS + _CONFIGURED_CORS_ORIGINS))
 TOKEN_TTL_SEC  = 30 * 60          # 30 minutes
 RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "5"))
 RATE_LIMIT_SEC = int(os.environ.get("RATE_LIMIT_SEC", str(60 * 60)))

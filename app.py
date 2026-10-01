@@ -28,6 +28,7 @@ import time
 import uuid
 import secrets
 import logging
+import threading
 from pathlib import Path
 from functools import wraps
 from datetime import datetime, timezone
@@ -1165,6 +1166,17 @@ def admin_api_control_center():
                             sensor, value, threshold,
                         )
                         alerts.insert(0, dict(created))
+        # Determine real camera push liveness from ESP32-CAM frame timestamps.
+        # A frame is considered fresh if received within the last 8 seconds.
+        # This is independent of the Firebase RTDB cameraOnline field.
+        camera_push_online = bool(_last_frame_time and (time.time() - _last_frame_time) < 8.0)
+        if live is not None:
+            live["camera_online"] = camera_push_online
+        else:
+            # Build a minimal live stub so the Cameras tab can report status
+            # even when Firebase is unavailable.
+            live = {"camera_online": camera_push_online}
+
         summary = {
             "total_users": len(users),
             "active_users": sum(1 for u in users if str(u.get("account_status","")).lower() == "enabled"),

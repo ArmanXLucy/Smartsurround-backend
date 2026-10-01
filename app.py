@@ -316,6 +316,67 @@ def _valid_upload_token(tok):
     exp = _upload_tokens.pop(tok, None)
     return exp is not None and exp >= time.time()
 
+import threading
+
+_latest_frame = None
+_frame_cond = threading.Condition()
+
+# ---------------------------------------------------------------------------
+# Token-only auth for the MJPEG stream endpoint
+# (defined here because @require_stream_token is used below before
+#  require_auth is defined further down the file)
+# ---------------------------------------------------------------------------
+def require_stream_token(f):
+    """Token-only gate for the MJPEG stream endpoint.
+
+    An <img> tag GET cannot send custom headers (no PIN possible), so we
+    only validate the short-lived session token here.  The token is already
+    issued only after full PIN + rate-limit verification, so token possession
+    is equivalent proof of an authenticated admin session.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if AUTH_DISABLED:
+            return f(*args, **kwargs)
+        tok = _token_from_header()
+        if not _valid_token(tok):
+            return ("Authentication required.", 401)
+        return f(*args, **kwargs)
+    return decorated
+
+# ---------------------------------------------------------------------------
+# ESP32-CAM / React live stream endpoints
+# ---------------------------------------------------------------------------
+@app.route("/api/camera/stream/push", methods=["POST"])
+def camera_stream_push():
+    global _latest_frame
+    if CAMERA_API_KEY:
+        supplied_key = request.headers.get("X-Camera-Key", "")
+        if not secrets.compare_digest(supplied_key, CAMERA_API_KEY):
+            return jsonify({"ok": False, "message": "Invalid key."}), 401
+    frame = request.data
+    if not frame:
+        return "No frame", 400
+    with _frame_cond:
+        _latest_frame = frame
+        _frame_cond.notify_all()
+    return "OK", 200
+
+def _generate_mjpeg():
+    while True:
+        with _frame_cond:
+            _frame_cond.wait(timeout=2.0)
+            frame = _latest_frame
+        if not frame:
+            continue
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+@app.route("/api/camera/stream/live")
+@require_stream_token
+def camera_stream_live():
+    return Flask.response_class(_generate_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
 # ---------------------------------------------------------------------------
 # ESP32-CAM / React camera AI endpoint
 # ---------------------------------------------------------------------------
@@ -491,6 +552,9 @@ def _token_from_header():
     cookie = request.cookies.get("ss_token", "")
     if cookie:
         return cookie.strip()
+    query_token = request.args.get("token", "")
+    if query_token:
+        return query_token.strip()
     return ""
 
 def _get_pin_from_request():
@@ -634,6 +698,8 @@ def require_auth(f):
         _rate_reset(ip)
         return f(*args, **kwargs)
     return decorated
+
+# (require_stream_token is defined above, near its first use)
 
 # ---------------------------------------------------------------------------
 # Track A — detection → admin queue

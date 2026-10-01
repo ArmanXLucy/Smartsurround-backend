@@ -316,10 +316,9 @@ def _valid_upload_token(tok):
     exp = _upload_tokens.pop(tok, None)
     return exp is not None and exp >= time.time()
 
-import threading
-
 _latest_frame = None
-_frame_cond = threading.Condition()
+_frame_cond   = threading.Condition()
+_last_frame_time = 0          # epoch seconds of last received frame
 
 # ---------------------------------------------------------------------------
 # Token-only auth for the MJPEG stream endpoint
@@ -349,7 +348,7 @@ def require_stream_token(f):
 # ---------------------------------------------------------------------------
 @app.route("/api/camera/stream/push", methods=["POST"])
 def camera_stream_push():
-    global _latest_frame
+    global _latest_frame, _last_frame_time
     if CAMERA_API_KEY:
         supplied_key = request.headers.get("X-Camera-Key", "")
         if not secrets.compare_digest(supplied_key, CAMERA_API_KEY):
@@ -358,16 +357,21 @@ def camera_stream_push():
     if not frame:
         return "No frame", 400
     with _frame_cond:
-        _latest_frame = frame
+        _latest_frame      = frame
+        _last_frame_time   = time.time()
         _frame_cond.notify_all()
     return "OK", 200
 
 def _generate_mjpeg():
+    """Generator that yields MJPEG frames to a streaming HTTP response."""
     while True:
         with _frame_cond:
-            _frame_cond.wait(timeout=2.0)
+            # Wait up to 3 s for a new frame before yielding keep-alive data
+            _frame_cond.wait(timeout=3.0)
             frame = _latest_frame
         if not frame:
+            # No frame yet — yield a keep-alive comment so the connection stays open
+            yield b'--frame\r\nContent-Type: text/plain\r\n\r\n\r\n'
             continue
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
@@ -375,7 +379,22 @@ def _generate_mjpeg():
 @app.route("/api/camera/stream/live")
 @require_stream_token
 def camera_stream_live():
-    return Flask.response_class(_generate_mjpeg(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Flask.response_class(
+        _generate_mjpeg(),
+        mimetype='multipart/x-mixed-replace; boundary=frame'
+    )
+
+@app.route("/api/camera/status")
+@require_stream_token
+def camera_status():
+    """Return whether the ESP32-CAM is currently pushing frames.
+    A frame is considered fresh if received within the last 5 seconds.
+    """
+    online = (time.time() - _last_frame_time) < 5.0 if _last_frame_time else False
+    return jsonify({
+        "online":          online,
+        "last_frame_ago":  round(time.time() - _last_frame_time, 1) if _last_frame_time else None,
+    })
 
 # ---------------------------------------------------------------------------
 # ESP32-CAM / React camera AI endpoint

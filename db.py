@@ -31,6 +31,7 @@ Track B adds, without touching Track A:
 
 import sqlite3
 import os
+import math
 from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "smartsurround.db")
@@ -937,9 +938,49 @@ def list_thresholds():
     return rows
 
 def update_thresholds(items, modified_by="Administrator"):
+    supported_units = {
+        "PM1.0": "µg/m³", "PM2.5": "µg/m³", "PM10": "µg/m³",
+        "CO2": "ppm", "VOC": "ppm", "IAQ": "index",
+        "Temperature": "°C", "Humidity": "%",
+    }
+    normalized = []
+    seen = set()
+    for item in items or []:
+        sensor = str(item.get("sensor") or "").strip()
+        if sensor not in supported_units:
+            raise ValueError(f"Unsupported threshold sensor: {sensor or 'missing'}")
+        if sensor in seen:
+            raise ValueError(f"Duplicate threshold sensor: {sensor}")
+        seen.add(sensor)
+
+        values = {}
+        for field in ("warning", "critical", "minimum", "maximum"):
+            raw = item.get(field)
+            if raw is None or raw == "":
+                values[field] = None
+                continue
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{sensor} {field} must be numeric or blank")
+            if not math.isfinite(value):
+                raise ValueError(f"{sensor} {field} must be finite")
+            values[field] = value
+
+        if values["warning"] is not None and values["critical"] is not None and values["warning"] > values["critical"]:
+            raise ValueError(f"{sensor} warning cannot exceed critical")
+        if values["minimum"] is not None and values["maximum"] is not None and values["minimum"] > values["maximum"]:
+            raise ValueError(f"{sensor} minimum cannot exceed maximum")
+
+        normalized.append({
+            "sensor": sensor,
+            **values,
+            "unit": str(item.get("unit") or supported_units[sensor]),
+        })
+
     conn = get_conn()
     now = datetime.now(timezone.utc).isoformat()
-    for item in items:
+    for item in normalized:
         conn.execute(
             """
             INSERT INTO thresholds(sensor, warning, critical, minimum, maximum, unit, updated_at, modified_by)
@@ -957,6 +998,16 @@ def update_thresholds(items, modified_by="Administrator"):
     rows = conn.execute("SELECT * FROM thresholds ORDER BY sensor").fetchall()
     conn.close()
     return rows
+
+def resolve_open_alerts_for_sensor(sensor):
+    conn = get_conn()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE alerts SET status='Resolved', resolved_at=? WHERE sensor=? AND status='Open'",
+        (now, sensor),
+    )
+    conn.commit()
+    conn.close()
 
 def create_alert(alert_type, severity, title, message, sensor=None, current_value=None,
                  threshold=None, user_id=None, latitude=None, longitude=None):

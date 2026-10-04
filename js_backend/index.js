@@ -42,13 +42,16 @@ function loadState() {
       return {
         thresholds: Array.isArray(parsed.thresholds) && parsed.thresholds.length ? parsed.thresholds : defaultThresholds,
         alerts: Array.isArray(parsed.alerts) ? parsed.alerts : [],
-        activity: Array.isArray(parsed.activity) ? parsed.activity : []
+        activity: Array.isArray(parsed.activity) ? parsed.activity : [],
+        users: Array.isArray(parsed.users) ? parsed.users : [],
+        locations: Array.isArray(parsed.locations) ? parsed.locations : [],
+        complaints: Array.isArray(parsed.complaints) ? parsed.complaints : []
       };
     }
   } catch (error) {
     console.warn('Unable to load JS backend state:', error.message);
   }
-  return { thresholds: defaultThresholds, alerts: [], activity: [] };
+  return { thresholds: defaultThresholds, alerts: [], activity: [], users: [], locations: [], complaints: [] };
 }
 
 let backendState = loadState();
@@ -396,7 +399,126 @@ function parseCookie(request, name) {
   return entry ? decodeURIComponent(entry.trim().slice(name.length + 1)) : null;
 }
 
+function requireUserBearer(req, res) {
+  const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (process.env.AUTH_DISABLED === '1' || token) return true;
+  res.status(401).json({ ok: false, message: 'User authentication required.' });
+  return false;
+}
+
 // ----- Endpoints -----
+
+// Keep the admin control center in sync with authenticated Firebase users.
+// The client already supplies its Firebase ID token for these existing calls;
+// the backend stores only the operational profile and latest activity needed
+// by the admin dashboard.
+app.post('/api/user/sync', (req, res) => {
+  if (!requireUserBearer(req, res)) return;
+  const userId = String(req.body?.user_id || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!userId || !email) return res.status(400).json({ ok: false, message: 'User identity is required.' });
+
+  const now = new Date().toISOString();
+  const existing = backendState.users.find((user) => user.user_id === userId);
+  const user = {
+    ...(existing || {}),
+    user_id: userId,
+    name: String(req.body?.name || existing?.name || email.split('@')[0]),
+    email,
+    status: String(req.body?.status || existing?.status || 'Working'),
+    account_status: 'Enabled',
+    last_active: now,
+    updated_at: now
+  };
+  if (existing) Object.assign(existing, user);
+  else backendState.users.push(user);
+  saveState();
+  res.json({ ok: true, user });
+});
+
+app.post('/api/user/location', (req, res) => {
+  if (!requireUserBearer(req, res)) return;
+  const userId = String(req.body?.user_id || '').trim();
+  const latitude = finiteNumber(req.body?.latitude);
+  const longitude = finiteNumber(req.body?.longitude);
+  if (!userId || latitude === null || longitude === null) {
+    return res.status(400).json({ ok: false, message: 'User and valid GPS coordinates are required.' });
+  }
+  const location = {
+    user_id: userId,
+    latitude,
+    longitude,
+    accuracy: finiteNumber(req.body?.accuracy),
+    timestamp: req.body?.timestamp || new Date().toISOString(),
+    status: String(req.body?.status || 'working')
+  };
+  backendState.locations = [location, ...backendState.locations.filter((item) => item.user_id !== userId)].slice(0, 500);
+  const user = backendState.users.find((item) => item.user_id === userId);
+  if (user) {
+    user.last_active = new Date().toISOString();
+    user.status = 'Working';
+  }
+  saveState();
+  res.json({ ok: true, location });
+});
+
+app.get('/api/complaints', (req, res) => {
+  const userId = String(req.query?.user_id || '').trim();
+  if (!userId) return res.status(400).json({ ok: false, message: 'user_id is required.' });
+  res.json({
+    ok: true,
+    complaints: backendState.complaints.filter((complaint) => complaint.user_id === userId)
+  });
+});
+
+app.post('/api/complaints', upload.single('attachment'), (req, res) => {
+  const userId = String(req.body?.user_id || '').trim();
+  const email = String(req.body?.email || '').trim();
+  const subject = String(req.body?.subject || '').trim();
+  const description = String(req.body?.description || '').trim();
+  const priority = String(req.body?.priority || 'Normal').trim();
+  if (!userId || !email || !subject || !description) {
+    return res.status(400).json({ ok: false, message: 'Name, email, subject and description are required.' });
+  }
+  if (!['Normal', 'Intermediate', 'Urgent'].includes(priority)) {
+    return res.status(400).json({ ok: false, message: 'Invalid priority.' });
+  }
+  if (subject.length > 160) return res.status(400).json({ ok: false, message: 'Subject must be 160 characters or fewer.' });
+  if (description.length > 8000) return res.status(400).json({ ok: false, message: 'Description must be 8000 characters or fewer.' });
+  if (req.file && req.file.size > 5 * 1024 * 1024) {
+    return res.status(400).json({ ok: false, message: 'Attachment must be 5 MB or smaller.' });
+  }
+
+  const now = new Date().toISOString();
+  const complaint = {
+    id: uuidv4(),
+    ticket_id: `SS-${now.slice(0, 10).replaceAll('-', '')}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+    user_id: userId,
+    user_name: String(req.body?.user_name || 'User').trim(),
+    email,
+    subject,
+    description,
+    priority,
+    attachment_path: req.file?.filename || null,
+    status: 'Open',
+    admin_reply: null,
+    created_at: now,
+    updated_at: now,
+    category: String(req.body?.category || 'Other'),
+    incident_latitude: finiteNumber(req.body?.incident_latitude),
+    incident_longitude: finiteNumber(req.body?.incident_longitude),
+    incident_accuracy: finiteNumber(req.body?.incident_accuracy),
+    incident_gps_time: req.body?.incident_gps_time || null,
+    verified_by: null,
+    verified_at: null,
+    verification_notes: null,
+    environment_snapshot_json: null
+  };
+  backendState.complaints.unshift(complaint);
+  backendState.complaints = backendState.complaints.slice(0, 1000);
+  saveState();
+  res.status(201).json({ ok: true, message: 'Complaint submitted successfully.', complaint });
+});
 
 // Health check – mirrors /api/health
 app.get('/api/health', (req, res) => {
@@ -512,19 +634,26 @@ app.get('/admin/api/control-center', requireAuth, async (req, res) => {
     last_update: live.updatedAt || new Date().toISOString(),
     sensor_availability: Object.entries(live).filter(([key, value]) => !['updatedAt', 'status', 'is_connected'].includes(key) && value !== null).map(([key]) => key).join(', ')
   }] : [];
+  const users = backendState.users;
+  const locations = backendState.locations;
   res.json({
     ok: true,
     thresholds: publicThresholds(),
     alerts: openAlerts,
     activity: backendState.activity,
-    complaints: [],
+    complaints: backendState.complaints,
     communications: [],
     detections: [],
-    users: [],
+    users,
+    locations,
     recipients: [],
     devices,
     live,
     summary: {
+      total_users: users.length,
+      active_users: users.filter((user) => String(user.account_status).toLowerCase() === 'enabled').length,
+      working_users: locations.filter((location) => String(location.status).toLowerCase() === 'working').length,
+      active_incidents: backendState.complaints.filter((complaint) => ['Open', 'In Progress'].includes(complaint.status)).length,
       connected_devices: devices.length,
       offline_devices: devices.length ? 0 : 1,
       open_alerts: openAlerts.length
@@ -535,6 +664,54 @@ app.get('/admin/api/control-center', requireAuth, async (req, res) => {
       firebase_admin_ready: Boolean(firebaseDatabaseUrl)
     }
   });
+});
+
+app.get('/admin/api/complaints', requireAuth, (req, res) => {
+  res.json({ ok: true, complaints: backendState.complaints });
+});
+
+app.post('/admin/complaints/:complaintId/update', requireAuth, (req, res) => {
+  const complaint = backendState.complaints.find((item) => item.id === req.params.complaintId);
+  if (!complaint) return res.status(404).json({ ok: false, message: 'Complaint not found.' });
+  const status = String(req.body?.status || complaint.status).trim();
+  const priority = String(req.body?.priority || complaint.priority).trim();
+  if (!['Open', 'In Progress', 'Resolved', 'Closed'].includes(status)) return res.status(400).json({ ok: false, message: 'Invalid complaint status.' });
+  if (!['Normal', 'Intermediate', 'Urgent', 'Critical'].includes(priority)) return res.status(400).json({ ok: false, message: 'Invalid complaint priority.' });
+  complaint.status = status;
+  complaint.priority = priority;
+  if (req.body?.admin_reply !== undefined) complaint.admin_reply = String(req.body.admin_reply || '').trim() || null;
+  complaint.updated_at = new Date().toISOString();
+  saveState();
+  res.json({ ok: true, message: `Ticket ${complaint.ticket_id} updated.`, complaint });
+});
+
+app.post('/admin/complaints/:complaintId/verify', requireAuth, (req, res) => {
+  const complaint = backendState.complaints.find((item) => item.id === req.params.complaintId);
+  if (!complaint) return res.status(404).json({ ok: false, message: 'Complaint not found.' });
+  const action = String(req.body?.action || '').trim().toLowerCase();
+  const notes = String(req.body?.notes || '').trim() || null;
+  if (!['verify', 'request_info', 'reject', 'escalate', 'resolve'].includes(action)) return res.status(400).json({ ok: false, message: 'Unsupported incident action.' });
+  complaint.status = action === 'resolve' ? 'Resolved' : action === 'reject' ? 'Closed' : action === 'request_info' ? 'Open' : 'In Progress';
+  if (action === 'escalate') complaint.priority = 'Urgent';
+  if (action !== 'request_info') {
+    complaint.verified_by = 'Administrator';
+    complaint.verified_at = new Date().toISOString();
+  } else if (notes) {
+    complaint.admin_reply = notes;
+  }
+  complaint.verification_notes = notes;
+  complaint.updated_at = new Date().toISOString();
+  saveState();
+  res.json({ ok: true, complaint });
+});
+
+app.get('/admin/complaints/:complaintId/attachment', requireAuth, (req, res) => {
+  const complaint = backendState.complaints.find((item) => item.id === req.params.complaintId);
+  if (!complaint?.attachment_path) return res.status(404).send('Attachment not found.');
+  const filename = path.basename(complaint.attachment_path);
+  const filePath = path.join(uploadDir, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send('Attachment not found.');
+  res.download(filePath, filename);
 });
 
 app.get('/admin/api/thresholds', requireAuth, (req, res) => {

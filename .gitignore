@@ -149,6 +149,10 @@ build/
 uploads/
 **/uploads/
 
+# JS backend runtime thresholds, alerts, and activity
+smartsurround-js-state.json
+js_backend/smartsurround-js-state.json
+
 letters/
 **/letters/
 

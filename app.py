@@ -631,7 +631,31 @@ def _to_float(value):
     except Exception:
         return None
 
+def _heartbeat_epoch(value):
+    """Convert common ESP32 heartbeat formats to epoch seconds."""
+    if value in (None, ""):
+        return None
+    try:
+        numeric = float(value)
+        if numeric > 100_000_000_000:
+            numeric /= 1000.0
+        if numeric > 1_000_000_000:
+            return numeric
+    except (TypeError, ValueError):
+        pass
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+_last_rtdb_heartbeat = None
+_last_rtdb_change_time = 0.0
+
 def _read_live_rtdb():
+    global _last_rtdb_heartbeat, _last_rtdb_change_time
     if not _init_firebase_admin() or firebase_admin_db is None:
         return None
     database_url = os.environ.get("FIREBASE_DATABASE_URL", "").strip()
@@ -643,27 +667,50 @@ def _read_live_rtdb():
         now = datetime.now(timezone.utc).isoformat()
         device_id = (
             source.get("deviceId") or source.get("device_id") or
-            source.get("ip") or root.get("deviceId") if isinstance(root, dict) else None
+            source.get("ip") or (root.get("deviceId") if isinstance(root, dict) else None)
         )
+        heartbeat = source.get("updatedAt") or source.get("timestamp")
+        is_fresh = False
+        if heartbeat is not None:
+            if _last_rtdb_heartbeat is not None and heartbeat != _last_rtdb_heartbeat:
+                _last_rtdb_change_time = time.time()
+            _last_rtdb_heartbeat = heartbeat
+        iaq_raw = source.get("iaq")
+        if iaq_raw in (None, ""):
+            iaq_raw = source.get("iaqScore")
+        if iaq_raw in (None, ""):
+            iaq_raw = source.get("airQualityIndex")
+        if iaq_raw in (None, ""):
+            iaq_raw = source.get("IAQ")
+        heartbeat_epoch = _heartbeat_epoch(heartbeat)
+        heartbeat_is_recent = (
+            heartbeat_epoch is not None
+            and heartbeat_epoch <= time.time() + 5.0
+            and (time.time() - heartbeat_epoch) <= 15.0
+        )
+        if heartbeat_is_recent or (_last_rtdb_change_time > 0 and (time.time() - _last_rtdb_change_time) <= 15.0):
+            is_fresh = True
+
         reading = {
             "timestamp": now,
             "device_id": str(device_id) if device_id else "firebase-sensors",
-            "temperature": _to_float(source.get("temperature")),
-            "humidity": _to_float(source.get("humidity")),
-            "pressure": _to_float(source.get("pressure") or source.get("atmosphericPressure")),
-            "pm1": _to_float(source.get("pm1")),
-            "pm25": _to_float(source.get("pm25")),
-            "pm10": _to_float(source.get("pm10")),
-            "co2": _to_float(source.get("co2") or source.get("co2Equivalent")),
-            "voc": _to_float(source.get("voc") or source.get("vocEquivalent")),
-            "iaq": _to_float(source.get("iaq") or source.get("iaqScore")),
+            "temperature": _to_float(source.get("temperature")) if is_fresh else None,
+            "humidity": _to_float(source.get("humidity")) if is_fresh else None,
+            "pressure": _to_float(source.get("pressure") or source.get("atmosphericPressure")) if is_fresh else None,
+            "pm1": _to_float(source.get("pm1")) if is_fresh else None,
+            "pm25": _to_float(source.get("pm25")) if is_fresh else None,
+            "pm10": _to_float(source.get("pm10")) if is_fresh else None,
+            "co2": _to_float(source.get("co2") or source.get("co2Equivalent")) if is_fresh else None,
+            "voc": _to_float(source.get("voc") or source.get("vocEquivalent")) if is_fresh else None,
+            "iaq": _to_float(iaq_raw) if is_fresh else None,
             "ip": source.get("ip") or (root.get("ip") if isinstance(root, dict) else None),
-            "status": source.get("status") or "Connected",
+            "status": "Connected" if is_fresh else "Offline",
+            "is_connected": is_fresh,
             "camera_online": bool(
                 source.get("cameraOnline")
                 if "cameraOnline" in source
                 else source.get("_camera", {}).get("online")
-            ),
+            ) if is_fresh else False,
             "camera_ip": source.get("camIp") or source.get("cameraIp") or source.get("_camera", {}).get("ip"),
             "gps": {
                 "latitude": _to_float(source.get("_gps", {}).get("latitude") or source.get("_gps", {}).get("lat")
@@ -672,13 +719,105 @@ def _read_live_rtdb():
                                        or source.get("_gps", {}).get("lon") or source.get("longitude")),
                 "accuracy": _to_float(source.get("_gps", {}).get("accuracy")),
                 "timestamp": source.get("_gps", {}).get("time") or source.get("_gps", {}).get("timestamp"),
-            },
-            "raw": source,
+            } if is_fresh else {},
+            "raw": source if is_fresh else {},
         }
         return reading
     except Exception:
         logger.exception("Unable to read Firebase Realtime Database for admin monitoring.")
         return None
+
+def _evaluate_environment_threshold(value, threshold):
+    """Return the configured severity/limit for a fresh reading, if any."""
+    number = _to_float(value)
+    if number is None or not isinstance(threshold, dict):
+        return None
+
+    critical = _to_float(threshold.get("critical"))
+    warning = _to_float(threshold.get("warning"))
+    minimum = _to_float(threshold.get("minimum"))
+    maximum = _to_float(threshold.get("maximum"))
+
+    # Critical and warning levels are inclusive. Range endpoints are safe;
+    # only values outside the configured range are warnings.
+    if critical is not None and number >= critical:
+        return "CRITICAL", critical
+    if warning is not None and number >= warning:
+        return "WARNING", warning
+    if minimum is not None and number < minimum:
+        return "WARNING", minimum
+    if maximum is not None and number > maximum:
+        return "WARNING", maximum
+    return None
+
+def _publish_environment_notification(alert):
+    """Publish one shared RTDB event; delivery filtering remains per user."""
+    if not alert or not _init_firebase_admin() or firebase_admin_db is None:
+        return
+    try:
+        created_ms = int(time.time() * 1000)
+        severity = str(alert.get("severity") or "WARNING").lower()
+        payload = {
+            "type": "alert",
+            "title": alert.get("title") or "Environmental alert",
+            "message": alert.get("message") or "Environmental threshold exceeded.",
+            "severity": severity,
+            "recipientType": "all",
+            "recipientId": None,
+            "recipientIds": None,
+            "alertId": alert.get("id"),
+            "sensor": alert.get("sensor"),
+            "createdAt": created_ms,
+            "read": False,
+            "readBy": {},
+            "soundType": severity,
+        }
+        firebase_admin_db.reference("notifications").push(payload)
+    except Exception:
+        logger.exception("Unable to fan out environmental notification.")
+
+def _process_environment_alerts(live, thresholds=None):
+    """Evaluate only fresh RTDB telemetry and deduplicate by open sensor alert."""
+    if not live or not live.get("is_connected"):
+        return []
+    threshold_rows = thresholds if thresholds is not None else [dict(r) for r in db.list_thresholds()]
+    threshold_map = {row.get("sensor"): row for row in threshold_rows}
+    sensor_values = {
+        "PM1.0": live.get("pm1"), "PM2.5": live.get("pm25"), "PM10": live.get("pm10"),
+        "CO2": live.get("co2"), "VOC": live.get("voc"), "IAQ": live.get("iaq"),
+        "Temperature": live.get("temperature"), "Humidity": live.get("humidity"),
+    }
+    created_alerts = []
+    open_alerts = {dict(row).get("sensor"): dict(row) for row in db.list_alerts(status="Open", limit=500)}
+
+    for sensor, value in sensor_values.items():
+        if value is None or sensor not in threshold_map:
+            continue
+        result = _evaluate_environment_threshold(value, threshold_map[sensor])
+        existing = open_alerts.get(sensor)
+        if result is None:
+            if existing:
+                db.resolve_open_alerts_for_sensor(sensor)
+            continue
+
+        severity, limit = result
+        if existing and str(existing.get("severity", "")).upper() == severity:
+            continue
+        if existing:
+            db.resolve_open_alerts_for_sensor(sensor)
+
+        threshold = threshold_map[sensor]
+        created = db.create_alert(
+            "Environmental", severity,
+            f"{sensor} threshold exceeded",
+            f"{sensor} is {value} {threshold.get('unit', '')} against configured threshold {limit}.",
+            sensor, value, limit,
+        )
+        alert = dict(created)
+        created_alerts.append(alert)
+        _publish_environment_notification(alert)
+
+    return created_alerts
 
 def _admin_activity(action, target=None, details=None):
     try:
@@ -1073,6 +1212,32 @@ def api_user_location():
     )
     return jsonify({"ok": True, "location": dict(row)})
 
+@app.route("/api/user/thresholds", methods=["GET", "OPTIONS"])
+def api_user_thresholds():
+    if request.method == "OPTIONS":
+        return ("", 204)
+    try:
+        claims = _verify_user_bearer()
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 401
+    rows = [dict(r) for r in db.list_thresholds()]
+    # A user threshold request is already part of the existing dashboard
+    # polling path, so use it to process the current trusted RTDB snapshot.
+    # Stale snapshots return is_connected=False and cannot create alerts.
+    _process_environment_alerts(_read_live_rtdb(), rows)
+    thresholds = [
+        {
+            "sensor": r.get("sensor"),
+            "warning": r.get("warning"),
+            "critical": r.get("critical"),
+            "minimum": r.get("minimum"),
+            "maximum": r.get("maximum"),
+            "unit": r.get("unit"),
+        }
+        for r in rows
+    ]
+    return jsonify({"ok": True, "thresholds": thresholds})
+
 @app.route("/api/user/environment", methods=["POST", "OPTIONS"])
 def api_user_environment():
     if request.method == "OPTIONS":
@@ -1082,13 +1247,14 @@ def api_user_environment():
     except Exception as exc:
         return jsonify({"ok": False, "message": str(exc)}), 401
     payload = request.get_json(silent=True) or {}
+    is_connected = bool(payload.get("is_connected"))
     reading = {
         key: payload.get(key) for key in (
             "temperature", "humidity", "pressure", "pm1", "pm25", "pm10", "co2", "voc", "iaq"
         )
     }
-    if not any(v not in (None, "") for v in reading.values()):
-        return jsonify({"ok": False, "message": "At least one sensor reading is required."}), 400
+    if not is_connected or not any(v not in (None, "") for v in reading.values()):
+        return jsonify({"ok": False, "message": "At least one active sensor reading is required."}), 400
     device_id = str(payload.get("device_id") or "firebase-sensors")
     reading["timestamp"] = payload.get("timestamp") or datetime.now(timezone.utc).isoformat()
     row = db.record_environment(reading, user_id=claims.get("uid"), device_id=device_id, source="user-dashboard")
@@ -1110,7 +1276,6 @@ def admin_api_control_center():
         now = datetime.now(timezone.utc)
         users = [dict(r) for r in db.list_users()]
         locations = [dict(r) for r in db.list_latest_user_locations()]
-        devices = [dict(r) for r in db.list_sensor_devices()]
         complaints = [dict(r) for r in db.list_complaints()]
         pending = [dict(r) for r in db.list_by_status("pending")]
         approved = [dict(r) for r in db.list_by_status("approved")]
@@ -1120,8 +1285,9 @@ def admin_api_control_center():
         activity = [dict(r) for r in db.list_admin_activity(250)]
         recipients = [dict(r) for r in db.list_recipients()]
         communications = [dict(r) for r in db.list_communications(150)]
-        if live:
-            # Record the current Firebase snapshot in history only when values exist.
+
+        if live and live.get("is_connected"):
+            # Record the current Firebase snapshot in history only when live is connected with fresh values.
             db.record_environment(live, device_id=live.get("device_id"), source="firebase-admin")
             db.upsert_sensor_device(
                 live.get("device_id") or "firebase-sensors",
@@ -1133,39 +1299,34 @@ def admin_api_control_center():
                 None,
                 {"ip": live.get("ip"), "camera_online": live.get("camera_online")},
             )
-            devices = [dict(r) for r in db.list_sensor_devices()]
-        # Create alert records from real live values + stored thresholds without inventing values.
-        if live:
-            tmap = {t["sensor"]: t for t in thresholds}
-            sensor_values = {
-                "PM1.0": live.get("pm1"), "PM2.5": live.get("pm25"), "PM10": live.get("pm10"),
-                "CO2": live.get("co2"), "VOC": live.get("voc"), "IAQ": live.get("iaq"),
-                "Temperature": live.get("temperature"), "Humidity": live.get("humidity"),
-            }
-            for sensor, value in sensor_values.items():
-                if value is None or sensor not in tmap:
-                    continue
-                th = tmap[sensor]
-                severity = None
-                threshold = None
-                if th.get("critical") is not None and float(value) >= float(th["critical"]):
-                    severity, threshold = "CRITICAL", th["critical"]
-                elif th.get("warning") is not None and float(value) >= float(th["warning"]):
-                    severity, threshold = "WARNING", th["warning"]
-                elif th.get("minimum") is not None and float(value) < float(th["minimum"]):
-                    severity, threshold = "WARNING", th["minimum"]
-                elif th.get("maximum") is not None and float(value) > float(th["maximum"]):
-                    severity, threshold = "WARNING", th["maximum"]
-                if severity:
-                    recent = [a for a in alerts if a.get("sensor") == sensor and a.get("status") == "Open"]
-                    if not recent:
-                        created = db.create_alert(
-                            "Environmental", severity,
-                            f"{sensor} threshold exceeded",
-                            f"{sensor} is {value} {th.get('unit','')} against configured threshold {threshold}.",
-                            sensor, value, threshold,
-                        )
-                        alerts.insert(0, dict(created))
+        elif live:
+            db.upsert_sensor_device(
+                live.get("device_id") or "firebase-sensors",
+                "ESP32",
+                None,
+                "OFFLINE",
+                live.get("timestamp"),
+                None,
+                None,
+                {"ip": live.get("ip"), "camera_online": False},
+            )
+
+        devices = [dict(r) for r in db.list_sensor_devices()]
+        for d in devices:
+            last_up = d.get("last_update")
+            if last_up:
+                try:
+                    dt = datetime.fromisoformat(last_up.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if (now - dt).total_seconds() > 15.0:
+                        d["connection"] = "OFFLINE"
+                except Exception:
+                    pass
+
+        # Evaluate fresh telemetry once and use the shared event for all users.
+        _process_environment_alerts(live, thresholds)
+        alerts = [dict(r) for r in db.list_alerts(limit=100)]
         # Determine real camera push liveness from ESP32-CAM frame timestamps.
         # A frame is considered fresh if received within the last 8 seconds.
         # This is independent of the Firebase RTDB cameraOnline field.
@@ -1175,7 +1336,7 @@ def admin_api_control_center():
         else:
             # Build a minimal live stub so the Cameras tab can report status
             # even when Firebase is unavailable.
-            live = {"camera_online": camera_push_online}
+            live = {"camera_online": camera_push_online, "is_connected": False, "status": "Offline"}
 
         summary = {
             "total_users": len(users),
@@ -1273,7 +1434,10 @@ def admin_api_thresholds():
     items = payload.get("thresholds") or []
     if not isinstance(items, list):
         return jsonify({"ok": False, "message": "thresholds must be a list."}), 400
-    rows = db.update_thresholds(items, modified_by="Administrator")
+    try:
+        rows = db.update_thresholds(items, modified_by="Administrator")
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
     _admin_activity("Threshold changed", "System", f"Updated {len(items)} threshold(s).")
     return jsonify({"ok": True, "thresholds": [dict(r) for r in rows]})
 

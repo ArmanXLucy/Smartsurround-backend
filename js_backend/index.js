@@ -10,6 +10,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -35,6 +36,39 @@ const defaultThresholds = [
   { sensor: 'Humidity', warning: null, critical: null, minimum: 30, maximum: 70, unit: '%' }
 ];
 
+// AWS SES client (used only when EMAIL_TEST_MODE != '1')
+const sesClient = new SESClient({
+  region: process.env.AWS_REGION || 'ap-southeast-2',
+  credentials: process.env.AWS_ACCESS_KEY_ID ? {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+  } : undefined
+});
+const EMAIL_FROM = process.env.EMAIL_FROM || 'SmartSurround Notices <noreply@smartsurround.in>';
+const EMAIL_TEST_MODE = (process.env.EMAIL_TEST_MODE || '1').trim() !== '0';
+
+async function sendViaSes(toAddress, subject, body) {
+  if (EMAIL_TEST_MODE) {
+    console.log(`[EMAIL TEST MODE] WOULD SEND to: ${toAddress} | Subject: ${subject}`);
+    return { ok: true, mode: 'test', to: toAddress };
+  }
+  const command = new SendEmailCommand({
+    Source: EMAIL_FROM,
+    Destination: { ToAddresses: [toAddress] },
+    Message: {
+      Subject: { Data: subject, Charset: 'UTF-8' },
+      Body: { Text: { Data: body, Charset: 'UTF-8' } }
+    }
+  });
+  try {
+    const resp = await sesClient.send(command);
+    return { ok: true, messageId: resp.MessageId, to: toAddress };
+  } catch (err) {
+    console.warn('SES send failed (soft):', err.message);
+    return { ok: false, reason: err.message, to: toAddress };
+  }
+}
+
 function loadState() {
   try {
     if (fs.existsSync(stateFile)) {
@@ -45,13 +79,15 @@ function loadState() {
         activity: Array.isArray(parsed.activity) ? parsed.activity : [],
         users: Array.isArray(parsed.users) ? parsed.users : [],
         locations: Array.isArray(parsed.locations) ? parsed.locations : [],
-        complaints: Array.isArray(parsed.complaints) ? parsed.complaints : []
+        complaints: Array.isArray(parsed.complaints) ? parsed.complaints : [],
+        recipients: Array.isArray(parsed.recipients) ? parsed.recipients : [],
+        communications: Array.isArray(parsed.communications) ? parsed.communications : []
       };
     }
   } catch (error) {
     console.warn('Unable to load JS backend state:', error.message);
   }
-  return { thresholds: defaultThresholds, alerts: [], activity: [], users: [], locations: [], complaints: [] };
+  return { thresholds: defaultThresholds, alerts: [], activity: [], users: [], locations: [], complaints: [], recipients: [], communications: [] };
 }
 
 let backendState = loadState();
@@ -642,11 +678,11 @@ app.get('/admin/api/control-center', requireAuth, async (req, res) => {
     alerts: openAlerts,
     activity: backendState.activity,
     complaints: backendState.complaints,
-    communications: [],
+    communications: backendState.communications || [],
     detections: [],
     users,
     locations,
-    recipients: [],
+    recipients: backendState.recipients || [],
     devices,
     live,
     summary: {
@@ -745,6 +781,133 @@ app.post('/admin/api/alerts/:id/resolve', requireAuth, (req, res) => {
   addActivity('Alert resolved', alert.id);
   saveState();
   res.json({ ok: true, alert });
+});
+
+// ─── Recipients CRUD ─────────────────────────────────────────────────────────
+app.get('/admin/api/recipients', requireAuth, (req, res) => {
+  res.json({ ok: true, recipients: backendState.recipients || [] });
+});
+
+app.post('/admin/api/recipients', requireAuth, (req, res) => {
+  const { name, department, role, email, notification_type } = req.body || {};
+  if (!name || !email) return res.status(400).json({ ok: false, message: 'name and email are required.' });
+  const recipient = {
+    id: uuidv4(),
+    name: String(name).trim(),
+    department: String(department || '').trim(),
+    role: String(role || '').trim(),
+    email: String(email).trim().toLowerCase(),
+    notification_type: String(notification_type || 'Incident').trim(),
+    created_at: new Date().toISOString()
+  };
+  if (!backendState.recipients) backendState.recipients = [];
+  backendState.recipients.push(recipient);
+  addActivity('Recipient added', 'Communications', `${recipient.name} <${recipient.email}>`);
+  saveState();
+  res.status(201).json({ ok: true, recipient });
+});
+
+app.delete('/admin/api/recipients/:id', requireAuth, (req, res) => {
+  if (!backendState.recipients) backendState.recipients = [];
+  const before = backendState.recipients.length;
+  backendState.recipients = backendState.recipients.filter((r) => r.id !== req.params.id);
+  if (backendState.recipients.length === before) return res.status(404).json({ ok: false, message: 'Recipient not found.' });
+  saveState();
+  res.json({ ok: true, message: 'Recipient removed.' });
+});
+
+// ─── Communications (drafts + send) ───────────────────────────────────────────
+app.post('/admin/api/communications/draft', requireAuth, (req, res) => {
+  const { incident_id, kind } = req.body || {};
+  if (!incident_id) return res.status(400).json({ ok: false, message: 'incident_id is required.' });
+
+  // Look up the complaint
+  const complaint = backendState.complaints.find((c) => c.id === incident_id);
+  if (!complaint) return res.status(404).json({ ok: false, message: 'Incident not found.' });
+
+  const ticketId = complaint.ticket_id || `INC-${complaint.id.slice(0, 6).toUpperCase()}`;
+  const subject = `[SmartSurround] Incident Report: ${complaint.subject || ticketId}`;
+  const lines = [
+    `OFFICIAL INCIDENT COMMUNICATION`,
+    `Ticket: ${ticketId}`,
+    `Date: ${new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' })}`,
+    ``,
+    `Dear Authority,`,
+    ``,
+    `We are writing to formally inform you of the following reported incident:`,
+    ``,
+    `  Subject   : ${complaint.subject || 'N/A'}`,
+    `  Category  : ${complaint.category || 'N/A'}`,
+    `  Priority  : ${complaint.priority || 'N/A'}`,
+    `  Status    : ${complaint.status || 'N/A'}`,
+    `  Reported  : ${complaint.created_at ? new Date(complaint.created_at).toLocaleString('en-IN') : 'N/A'}`,
+    complaint.incident_latitude ? `  Location  : ${complaint.incident_latitude.toFixed(5)}, ${complaint.incident_longitude.toFixed(5)}` : null,
+    ``,
+    `Description:`,
+    complaint.description || 'No description provided.',
+    ``,
+    complaint.admin_reply ? `Admin Notes:\n${complaint.admin_reply}\n` : null,
+    `Kindly take the necessary action at the earliest.`,
+    ``,
+    `Regards,`,
+    `SmartSurround Administration`
+  ].filter((l) => l !== null).join('\n');
+
+  if (!backendState.communications) backendState.communications = [];
+
+  // Check if a draft for this incident already exists; reuse it
+  let draft = backendState.communications.find((c) => c.incident_id === incident_id && c.status === 'Draft');
+  if (!draft) {
+    draft = {
+      id: uuidv4(),
+      incident_id,
+      ticket_id: ticketId,
+      kind: kind || 'complaint',
+      subject,
+      body: lines,
+      recipient: '',
+      status: 'Draft',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    backendState.communications.push(draft);
+    addActivity('Draft generated', 'Communications', ticketId);
+    saveState();
+  }
+  res.json({ ok: true, draft });
+});
+
+app.put('/admin/api/communications/:id', requireAuth, (req, res) => {
+  if (!backendState.communications) backendState.communications = [];
+  const comm = backendState.communications.find((c) => c.id === req.params.id);
+  if (!comm) return res.status(404).json({ ok: false, message: 'Draft not found.' });
+  if (comm.status === 'Sent') return res.status(400).json({ ok: false, message: 'Cannot edit a sent communication.' });
+  if (req.body.subject !== undefined) comm.subject = String(req.body.subject).trim();
+  if (req.body.body !== undefined) comm.body = String(req.body.body);
+  if (req.body.recipient !== undefined) comm.recipient = String(req.body.recipient).trim();
+  comm.updated_at = new Date().toISOString();
+  saveState();
+  res.json({ ok: true, communication: comm });
+});
+
+app.post('/admin/api/communications/:id/send', requireAuth, async (req, res) => {
+  if (!backendState.communications) backendState.communications = [];
+  const comm = backendState.communications.find((c) => c.id === req.params.id);
+  if (!comm) return res.status(404).json({ ok: false, message: 'Draft not found.' });
+  if (comm.status === 'Sent') return res.status(400).json({ ok: false, message: 'Already sent.' });
+  if (!comm.recipient) return res.status(400).json({ ok: false, message: 'Set a recipient before sending.' });
+  try {
+    const result = await sendViaSes(comm.recipient, comm.subject, comm.body);
+    comm.status = 'Sent';
+    comm.sent_at = new Date().toISOString();
+    comm.email_result = result;
+    addActivity('Communication sent', 'Communications', `${comm.ticket_id} → ${comm.recipient}`);
+    saveState();
+    const mode = EMAIL_TEST_MODE ? ' (test mode – not actually delivered)' : '';
+    res.json({ ok: true, message: `Email dispatched to ${comm.recipient}${mode}.`, communication: comm });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: err.message || 'Send failed.' });
+  }
 });
 
 // Admin API placeholder – returns empty arrays for pending/approved/rejected

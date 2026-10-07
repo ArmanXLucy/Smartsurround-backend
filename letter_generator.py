@@ -111,3 +111,173 @@ def generate_letter(detection) -> str:
 
     doc.build(story)
     return filepath
+
+
+def _resolve_complaint_image(incident):
+    """Locate the incident attachment image for the PDF report.
+    Checks complaint attachment_path in uploads/complaints, uploads, and js_backend/uploads.
+    """
+    raw = (incident.get("attachment_path") or incident.get("image_path") or "").strip()
+    if not raw:
+        return None
+    if os.path.isabs(raw) and os.path.exists(raw):
+        return raw
+
+    clean = os.path.basename(raw.replace("\\", "/"))
+    candidates = [
+        os.path.join(UPLOADS_DIR, "complaints", clean),
+        os.path.join(UPLOADS_DIR, clean),
+        os.path.join(os.path.dirname(__file__), "js_backend", "uploads", clean),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            ext = os.path.splitext(c)[1].lower()
+            if ext in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}:
+                return c
+    return None
+
+
+def generate_incident_report(incident) -> str:
+    """
+    Generate an official SMARTSURROUND INCIDENT REPORT PDF using reportlab.
+    Includes:
+      - Incident ID
+      - Problem
+      - Category
+      - Severity / Urgency
+      - Status
+      - User
+      - GPS Location (Latitude, Longitude, Accuracy)
+      - Submitted time
+      - Issue Description
+      - Incident Image (embedded if available, or 'No incident image available.')
+    """
+    ticket_id = incident.get("ticket_id") or f"SS-{incident.get('id', 'UNKNOWN')}"
+    safe_filename = f"SmartSurround-Incident-{ticket_id}.pdf".replace(" ", "_").replace("/", "-")
+    filepath = os.path.join(LETTERS_DIR, safe_filename)
+
+    doc = SimpleDocTemplate(
+        filepath,
+        pagesize=A4,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+        leftMargin=1.5 * cm,
+        rightMargin=1.5 * cm,
+    )
+    styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = styles["Heading1"]
+    title_style.fontSize = 18
+    title_style.leading = 22
+    title_style.textColor = colors.HexColor("#0f172a")
+
+    sub_style = styles["Normal"]
+    sub_style.fontSize = 9
+    sub_style.textColor = colors.HexColor("#64748b")
+    sub_style.leading = 12
+
+    label_style = styles["Normal"]
+    label_style.fontSize = 10
+    label_style.leading = 14
+    label_style.textColor = colors.HexColor("#1e293b")
+
+    bold_label = styles["Normal"]
+    bold_label.fontSize = 10
+    bold_label.leading = 14
+    bold_label.textColor = colors.HexColor("#0f172a")
+
+    story = []
+
+    # Header banner
+    story.append(Paragraph("<b>SMARTSURROUND INCIDENT REPORT</b>", title_style))
+    story.append(Paragraph(f"Official municipal incident notification & verification audit · Generated on {datetime.now().strftime('%d %B %Y, %H:%M:%S UTC')}", sub_style))
+    story.append(Spacer(1, 0.4 * cm))
+
+    # Incident Details Table
+    problem = incident.get("subject") or incident.get("damage_class") or "Reported incident"
+    category = incident.get("category") or incident.get("hazard_type") or "Road Damage"
+    severity = incident.get("priority") or incident.get("severity") or "Normal"
+    status = incident.get("status") or "Open"
+    user_name = incident.get("user_name") or incident.get("email") or incident.get("user_id") or "Citizen"
+
+    # GPS coordinates
+    lat = incident.get("incident_latitude")
+    if lat is None:
+        lat = incident.get("lat")
+    lon = incident.get("incident_longitude")
+    if lon is None:
+        lon = incident.get("lon")
+    acc = incident.get("incident_accuracy")
+    if acc is None:
+        acc = incident.get("accuracy")
+
+    lat_str = f"{float(lat):.6f}" if lat is not None else "Not recorded"
+    lon_str = f"{float(lon):.6f}" if lon is not None else "Not recorded"
+    acc_str = f"±{float(acc):.1f} m" if acc is not None else "Unavailable"
+    gps_formatted = f"Latitude: {lat_str} | Longitude: {lon_str} | Accuracy: {acc_str}"
+
+    submitted = incident.get("created_at") or incident.get("incident_gps_time") or "N/A"
+    description = incident.get("description") or "[No description provided]"
+
+    table_data = [
+        [Paragraph("<b>Incident ID:</b>", bold_label), Paragraph(f"<b>{ticket_id}</b>", bold_label)],
+        [Paragraph("<b>Problem:</b>", bold_label), Paragraph(str(problem), label_style)],
+        [Paragraph("<b>Category:</b>", bold_label), Paragraph(str(category), label_style)],
+        [Paragraph("<b>Severity / Urgency:</b>", bold_label), Paragraph(f"<b>{str(severity).upper()}</b>", bold_label)],
+        [Paragraph("<b>Status:</b>", bold_label), Paragraph(f"<b>{str(status).upper()}</b>", bold_label)],
+        [Paragraph("<b>User:</b>", bold_label), Paragraph(str(user_name), label_style)],
+        [Paragraph("<b>GPS Location:</b>", bold_label), Paragraph(gps_formatted, label_style)],
+        [Paragraph("<b>Submitted:</b>", bold_label), Paragraph(str(submitted), label_style)],
+    ]
+
+    details_table = Table(table_data, colWidths=[4.2 * cm, 13.8 * cm])
+    details_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e2e8f0")),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+    story.append(details_table)
+    story.append(Spacer(1, 0.4 * cm))
+
+    # Issue Description
+    story.append(Paragraph("<b>Issue Description:</b>", bold_label))
+    story.append(Spacer(1, 0.15 * cm))
+    desc_p = Paragraph(str(description).replace("\n", "<br/>"), label_style)
+    desc_table = Table([[desc_p]], colWidths=[18.0 * cm])
+    desc_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#f1f5f9")),
+        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor("#cbd5e1")),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    story.append(desc_table)
+    story.append(Spacer(1, 0.4 * cm))
+
+    # Incident Image Section
+    story.append(Paragraph("<b>Incident Image:</b>", bold_label))
+    story.append(Spacer(1, 0.15 * cm))
+
+    img_path = _resolve_complaint_image(incident)
+    if not img_path:
+        img_path = _resolve_image(incident)
+
+    if img_path and os.path.isfile(img_path):
+        try:
+            story.append(RLImage(img_path, width=12 * cm, height=8.5 * cm))
+        except Exception:
+            story.append(Paragraph("<i>Incident image could not be rendered.</i>", sub_style))
+    else:
+        story.append(Paragraph("<i>No incident image available.</i>", sub_style))
+
+    story.append(Spacer(1, 0.6 * cm))
+    story.append(Paragraph(f"<b>SmartSurround Admin Control Center</b><br/>Official automated notification system", sub_style))
+
+    doc.build(story)
+    return filepath
